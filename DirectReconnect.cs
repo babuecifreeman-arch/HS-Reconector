@@ -25,6 +25,7 @@ namespace HearthstoneReconnector
         internal static string Execute(int pid, EventWaitHandle cancel) { return Execute(pid,cancel,null,0); }
         internal static string Execute(int pid, EventWaitHandle cancel, string selectedKey, long expectedStart)
         {
+            string attempt=Guid.NewGuid().ToString("N").Substring(0,8);
             string path; DateTime start;
             using(var process = Process.GetProcessById(pid)) {
                 if(!process.ProcessName.Equals("Hearthstone",StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Процесс не является Hearthstone.");
@@ -32,38 +33,66 @@ namespace HearthstoneReconnector
                 if(expectedStart!=0 && start.ToUniversalTime().Ticks!=expectedStart)throw new IOException("Процесс игры изменился после выбора.");
             }
             var before=GameConnections.Read(pid);
-            foreach(var connection in before) ConnectionManager.Log("CANDIDATE " + connection + " localIP="+connection.LocalAddress);
-            var target=selectedKey==null?GameConnections.Select(before,GameConnections.ReadLoggedEndpoint(path)):ConnectionObservation.Parse(selectedKey);
+            string loggedEndpoint=GameConnections.ReadLoggedEndpoint(path);
+            ConnectionManager.Log("RECONNECT_BASELINE attempt="+attempt+" pid="+pid+" socketCount="+before.Count+" loggedEndpoint="+(loggedEndpoint??"<none>"));
+            foreach(var connection in before) {
+                ConnectionManager.Log("CANDIDATE "+connection+" localIP="+connection.LocalAddress);
+                ConnectionManager.Log("RECONNECT_SOCKET attempt="+attempt+" phase=BEFORE socket="+Describe(connection));
+            }
+            var target=selectedKey==null?GameConnections.Select(before,loggedEndpoint):ConnectionObservation.Parse(selectedKey);
             if(target!=null && !ContainsSocket(before,target))throw new IOException("Выбранное соединение уже исчезло. Обновите список.");
             if(target==null) throw new InvalidOperationException("Не удалось однозначно определить соединение матча. См. CANDIDATE в журнале.");
+            ConnectionManager.Log("RECONNECT_TARGET attempt="+attempt+" socket="+Describe(target)+" source="+(selectedKey==null?"AUTO":"SELECTED"));
             var native=MakeRow(target);
-            var log=GameLogCursor.Capture(path);
+            var log=GameLogCursor.Capture(path,attempt);
             if(cancel.WaitOne(0)) return "CANCELED|Операция отменена.";
             bool stillExists=false; foreach(var current in GameConnections.Read(pid)) if(current.SameSocket(target)) stillExists=true;
             if(!stillExists) throw new IOException("Соединение изменилось до отключения. Повторите попытку после восстановления игры.");
             using(var process=Process.GetProcessById(pid)) if(process.StartTime!=start) throw new IOException("Процесс игры изменился.");
-            ConnectionManager.Log("DIRECT_BEGIN pid="+pid+" target="+target+" localIP="+target.LocalAddress);
+            ConnectionManager.Log("DIRECT_BEGIN attempt="+attempt+" pid="+pid+" target="+Describe(target));
             uint code=SetTcpEntry(ref native);
-            ConnectionManager.Log("SET_TCP_ENTRY result="+code);
+            ConnectionManager.Log("SET_TCP_ENTRY attempt="+attempt+" result="+code);
             if(code!=0) throw new Win32Exception((int)code,"Не удалось разорвать выбранное соединение: "+new Win32Exception((int)code).Message);
-            var clock=Stopwatch.StartNew(); bool oldGone=false, newFound=false;
+            var clock=Stopwatch.StartNew(); bool oldGone=false, newFound=false;long replacementMs=-1;GameConnection replacement=null;
+            var previous=before;
             while(clock.ElapsedMilliseconds<12000) {
                 if(cancel.WaitOne(100)) return "CANCELED|Разрыв выполнен; ожидание отменено. Блокирующих правил нет.";
                 using(var process=Process.GetProcessById(pid)) if(process.HasExited || process.StartTime!=start) throw new IOException("Клиент Hearthstone завершился после отключения.");
                 var rows=GameConnections.Read(pid); bool present=false;
+                LogSocketChanges(attempt,clock.ElapsedMilliseconds,previous,rows,before,target);
+                previous=rows;
                 foreach(var row in rows) {
                     if(row.SameSocket(target)) present=true;
-                    else if(row.RemotePort==target.RemotePort && row.RemoteAddress==target.RemoteAddress && !ContainsSocket(before,row)) newFound=true;
+                    else if(row.RemotePort==target.RemotePort && row.RemoteAddress==target.RemoteAddress && !ContainsSocket(before,row)) {
+                        newFound=true;if(replacement==null){replacement=row;replacementMs=clock.ElapsedMilliseconds;ConnectionManager.Log("TARGET_REPLACEMENT attempt="+attempt+" elapsedMs="+replacementMs+" socket="+Describe(row));}
+                    }
                 }
-                if(!present && !oldGone) { oldGone=true; ConnectionManager.Log("OLD_SOCKET_GONE elapsedMs="+clock.ElapsedMilliseconds); }
-                if(oldGone && newFound && log!=null && log.MatchStarted()) {
-                    ConnectionManager.Log("MATCH_RESTORED elapsedMs="+clock.ElapsedMilliseconds);
-                    try { new ConnectionMemory().Confirm(path,target,"MATCH_RESTORED"); } catch(Exception ex) { ConnectionManager.Log("MEMORY_SAVE "+ex.Message); }
+                if(!present && !oldGone) { oldGone=true; ConnectionManager.Log("OLD_SOCKET_GONE attempt="+attempt+" elapsedMs="+clock.ElapsedMilliseconds); }
+                bool matchStarted=log!=null && log.MatchStarted(attempt);
+                if(oldGone && newFound && matchStarted) {
+                    ConnectionManager.Log("MATCH_RESTORED attempt="+attempt+" elapsedMs="+clock.ElapsedMilliseconds+" logEndpoint="+(log.LastEndpoint??"<none>"));
+                    try { new ConnectionMemory().Confirm(path,replacement??target,"MATCH_RESTORED"); } catch(Exception ex) { ConnectionManager.Log("MEMORY_SAVE "+ex.Message); }
                     return "MATCH_RESTORED|Новое TCP-соединение и SERVER_GAME_STARTED подтверждены.";
                 }
             }
-            if(oldGone && newFound) return "SOCKET_REPLACED|Новое TCP-соединение найдено. Возврат в матч по игровому журналу не подтверждён.";
+            ConnectionManager.Log("RECONNECT_TIMEOUT attempt="+attempt+" oldGone="+oldGone+" exactEndpointReplacement="+newFound+" logMatchStarted="+(log!=null&&log.HasMatchStarted)+" logEndpoint="+(log==null||log.LastEndpoint==null?"<none>":log.LastEndpoint)+" finalSocketCount="+previous.Count);
+            foreach(var connection in previous) ConnectionManager.Log("RECONNECT_SOCKET attempt="+attempt+" phase=TIMEOUT socket="+Describe(connection)+" relation="+Relation(connection,target)+" existedBefore="+ContainsSocket(before,connection));
+            if(oldGone && newFound) {
+                if(replacementMs>=2000)try { new ConnectionMemory().Confirm(path,replacement??target,"DELAYED_SOCKET_REPLACEMENT"); } catch(Exception ex) { ConnectionManager.Log("MEMORY_SAVE "+ex.Message); }
+                return "SOCKET_REPLACED|Новое TCP-соединение найдено. Возврат в матч по игровому журналу не подтверждён.";
+            }
             throw new IOException(oldGone?"Старое соединение закрыто, но новое не найдено за 12 секунд. Проверьте состояние игры.":"Закрытие старого соединения не подтверждено. См. журнал.");
+        }
+        static string Describe(GameConnection row) { return row.LocalAddress+":"+row.LocalPort+"->"+row.RemoteAddress+":"+row.RemotePort; }
+        static string Relation(GameConnection row,GameConnection target) {
+            if(row.RemoteAddress==target.RemoteAddress && row.RemotePort==target.RemotePort)return "SAME_REMOTE_ENDPOINT";
+            if(row.RemoteAddress==target.RemoteAddress)return "SAME_HOST_NEW_REMOTE_PORT";
+            if(row.RemotePort==target.RemotePort)return "NEW_HOST_SAME_REMOTE_PORT";
+            return "NEW_HOST_AND_REMOTE_PORT";
+        }
+        static void LogSocketChanges(string attempt,long elapsed,List<GameConnection> previous,List<GameConnection> current,List<GameConnection> baseline,GameConnection target) {
+            foreach(var row in previous)if(!ContainsSocket(current,row))ConnectionManager.Log("SOCKET_REMOVED attempt="+attempt+" elapsedMs="+elapsed+" socket="+Describe(row)+" relation="+Relation(row,target)+" existedBefore="+ContainsSocket(baseline,row));
+            foreach(var row in current)if(!ContainsSocket(previous,row))ConnectionManager.Log("SOCKET_ADDED attempt="+attempt+" elapsedMs="+elapsed+" socket="+Describe(row)+" relation="+Relation(row,target)+" existedBefore="+ContainsSocket(baseline,row));
         }
         static bool ContainsSocket(List<GameConnection> rows,GameConnection target) { foreach(var row in rows) if(row.SameSocket(target))return true;return false; }
         internal static void SelfTest() {
@@ -75,6 +104,7 @@ namespace HearthstoneReconnector
             bool refused=false;try {MakeRow(new GameConnection{LocalAddress="::1",RemoteAddress="2001:db8::1",LocalPort=1234,RemotePort=3724});}catch(NotSupportedException){refused=true;}
             if(!refused)throw new Exception("IPv6 refusal failed.");
             GameConnections.SelfTest();
+            ConnectionMemory.SelfTest();
         }
         internal static void NativeLoopbackTest() {
             var listener=new System.Net.Sockets.TcpListener(IPAddress.Loopback,0);listener.Start();
@@ -101,9 +131,12 @@ namespace HearthstoneReconnector
     }
     internal sealed class GameLogCursor
     {
-        readonly string file; readonly long offset;
-        GameLogCursor(string path,long position){file=path;offset=position;}
-        internal static GameLogCursor Capture(string gamePath) {
+        readonly string file; long position; string carry=""; bool matchStarted; string lastEndpoint; long pendingBytes; DateTime lastProgressLog=DateTime.MinValue,lastErrorLog=DateTime.MinValue; string lastError;
+        internal bool HasMatchStarted { get { return matchStarted; } }
+        internal string LastEndpoint { get { return lastEndpoint; } }
+        GameLogCursor(string path,long offset){file=path;position=offset;}
+        internal static GameLogCursor Capture(string gamePath) { return Capture(gamePath,null); }
+        internal static GameLogCursor Capture(string gamePath,string attempt) {
             try {
                 var root=Path.Combine(Path.GetDirectoryName(gamePath),"Logs");
                 string best=null; DateTime newest=DateTime.MinValue;
@@ -112,15 +145,39 @@ namespace HearthstoneReconnector
                 foreach(var dir in dirs)foreach(var name in new[]{"GameNetLogger.log","Hearthstone.log"}) {
                     string file=Path.Combine(dir,name);if(File.Exists(file)&&File.GetLastWriteTimeUtc(file)>newest){best=file;newest=File.GetLastWriteTimeUtc(file);}
                 }
-                if(best==null || newest<DateTime.UtcNow.AddHours(-1))return null;
-                return new GameLogCursor(best,new FileInfo(best).Length);
-            }catch{return null;}
+                if(best==null || newest<DateTime.UtcNow.AddHours(-1)){ConnectionManager.Log("GAME_LOG_CAPTURE attempt="+(attempt??"<none>")+" result=NONE");return null;}
+                long length=new FileInfo(best).Length;
+                ConnectionManager.Log("GAME_LOG_CAPTURE attempt="+(attempt??"<none>")+" file="+best+" offset="+length+" modifiedUtc="+newest.ToString("o"));
+                return new GameLogCursor(best,length);
+            }catch(Exception ex){ConnectionManager.Log("GAME_LOG_CAPTURE attempt="+(attempt??"<none>")+" error="+ex.Message);return null;}
         }
-        internal bool MatchStarted(){
+        internal bool MatchStarted(){return MatchStarted(null);}
+        internal bool MatchStarted(string attempt){
             try{using(var stream=new FileStream(file,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)){
-                if(stream.Length<offset)return false;stream.Seek(offset,SeekOrigin.Begin);
-                using(var reader=new StreamReader(stream,Encoding.UTF8))return reader.ReadToEnd().Contains("SERVER_GAME_STARTED");
-            }}catch{return false;}
+                if(stream.Length<position){ConnectionManager.Log("GAME_LOG_TRUNCATED attempt="+(attempt??"<none>")+" file="+file+" oldOffset="+position+" newLength="+stream.Length);position=0;carry="";}
+                if(stream.Length==position)return matchStarted;
+                long end=stream.Length;long added=end-position;stream.Seek(position,SeekOrigin.Begin);
+                string text;using(var reader=new StreamReader(stream,Encoding.UTF8)){text=reader.ReadToEnd();}
+                position=end;pendingBytes+=added;
+                string searchable=carry+text;
+                bool newStarted=!matchStarted&&searchable.Contains("SERVER_GAME_STARTED");
+                string endpoint=GameConnections.ParseEndpoint(searchable);
+                if(newStarted)matchStarted=true;
+                bool endpointChanged=endpoint!=null&&endpoint!=lastEndpoint;
+                if(endpointChanged)lastEndpoint=endpoint;
+                carry=searchable.Length>512?searchable.Substring(searchable.Length-512):searchable;
+                if(newStarted || endpointChanged || DateTime.UtcNow-lastProgressLog>=TimeSpan.FromSeconds(1)){
+                    ConnectionManager.Log("GAME_LOG_DELTA attempt="+(attempt??"<none>")+" bytes="+pendingBytes+" serverGameStarted="+newStarted+" endpoint="+(endpointChanged?endpoint:"<none>")+" file="+file);
+                    pendingBytes=0;lastProgressLog=DateTime.UtcNow;
+                }
+                return matchStarted;
+            }}catch(Exception ex){
+                if(ex.Message!=lastError||DateTime.UtcNow-lastErrorLog>=TimeSpan.FromSeconds(2)){
+                    ConnectionManager.Log("GAME_LOG_READ attempt="+(attempt??"<none>")+" error="+ex.Message);
+                    lastError=ex.Message;lastErrorLog=DateTime.UtcNow;
+                }
+                return matchStarted;
+            }
         }
     }
 }

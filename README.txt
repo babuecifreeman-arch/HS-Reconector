@@ -46,8 +46,17 @@
 Повторное нажатие недоступно до завершения операции и ещё 12 секунд после неё.
 
 Трей → «Открыть журнал». В reconnectоr.log записываются:
-CANDIDATE (new/known), SELECT (GAME_LOG, MEMORY_AND_NEW_SOCKET, UNIQUE_3724, MANUAL),
+CANDIDATE (new/known), SELECT (GAME_LOG, MEMORY_EXACT_ENDPOINT,
+MEMORY_NETWORK_AND_PORT, KNOWN_PORT_AND_UNIQUE_NEW_SOCKET, UNIQUE_3724, MANUAL),
 DIRECT_BEGIN, SET_TCP_ENTRY, OLD_SOCKET_GONE, MATCH_RESTORED и MEMORY_CONFIRMED.
+Для диагностики смены адреса каждый запуск имеет поле attempt. RECONNECT_BASELINE
+и RECONNECT_TARGET фиксируют исходные сокеты и выбор; SOCKET_REMOVED/SOCKET_ADDED —
+полный локальный и удалённый адрес, время появления и отношение к выбранному сокету:
+SAME_REMOTE_ENDPOINT, SAME_HOST_NEW_REMOTE_PORT, NEW_HOST_SAME_REMOTE_PORT либо
+NEW_HOST_AND_REMOTE_PORT. GAME_LOG_CAPTURE/GAME_LOG_DELTA показывают выбранный файл,
+число новых байтов, свежий endpoint и SERVER_GAME_STARTED. RECONNECT_TIMEOUT содержит
+итоговые признаки и снимок всех оставшихся сокетов. Строки одного опыта сопоставляются
+по одинаковому attempt; журнал не содержит содержимое игровых сообщений.
 Все данные локальные, приложение ничего не отправляет на внешние сервисы.
 
 ИНТЕРФЕЙС

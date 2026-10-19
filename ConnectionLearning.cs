@@ -63,7 +63,7 @@ namespace HearthstoneReconnector {
             return result;
         }
         internal void Confirm(string path,GameConnection target,string evidence) {
-            if(evidence!="MATCH_RESTORED" && evidence!="USER_CONFIRMED")throw new ArgumentException("Нет подтверждения возврата в матч.");
+            if(evidence!="MATCH_RESTORED" && evidence!="USER_CONFIRMED" && evidence!="DELAYED_SOCKET_REPLACEMENT")throw new ArgumentException("Нет подтверждения возврата в матч.");
             var profiles=Load();profiles.RemoveAll(delegate(Profile p){return SamePath(p.Path,path)&&p.Address==target.RemoteAddress&&p.Port==target.RemotePort;});
             profiles.Insert(0,new Profile{Path=path,Address=target.RemoteAddress,Port=target.RemotePort,Confirmed=DateTime.UtcNow});
             if(profiles.Count>128)profiles.RemoveRange(128,profiles.Count-128);
@@ -77,6 +77,12 @@ namespace HearthstoneReconnector {
         static bool SamePath(string a,string b){return string.Equals(a,b,StringComparison.OrdinalIgnoreCase);}
         internal bool Known(string path,GameConnection row){foreach(var p in Load())if(SamePath(p.Path,path)&&p.Address==row.RemoteAddress&&p.Port==row.RemotePort)return true;return false;}
         internal bool KnownPort(string path,int port){foreach(var p in Load())if(SamePath(p.Path,path)&&p.Port==port)return true;return false;}
+        internal bool KnownNetwork(string path,GameConnection row){foreach(var p in Load())if(SamePath(p.Path,path)&&p.Port==row.RemotePort&&SameNetwork(p.Address,row.RemoteAddress))return true;return false;}
+        static bool SameNetwork(string left,string right) {
+            IPAddress a,b;if(!IPAddress.TryParse(left,out a)||!IPAddress.TryParse(right,out b))return false;
+            byte[] x=a.GetAddressBytes(),y=b.GetAddressBytes();if(x.Length!=y.Length)return false;
+            int prefix=x.Length==4?2:8;for(int i=0;i<prefix;i++)if(x[i]!=y[i])return false;return true;
+        }
         internal GameConnection Select(ConnectionSnapshot snapshot,ConnectionObservation observation,out string reason) {
             // A current log match takes precedence even when another connection uses port 3724.
             GameConnection found=null;int count=0;
@@ -85,11 +91,48 @@ namespace HearthstoneReconnector {
             var known=new List<GameConnection>();
             foreach(var row in snapshot.Rows)if(Known(snapshot.Path,row))known.Add(row);
             if(known.Count>0) {
-                // A known service endpoint or a reused endpoint must not win by port alone.
-                reason="MEMORY_AND_NEW_SOCKET";
-                return known.Count==1 && observation.IsNew(known[0],DateTime.UtcNow)?known[0]:null;
+                reason="MEMORY_EXACT_ENDPOINT";
+                return known.Count==1?known[0]:null;
+            }
+            var knownNetwork=new List<GameConnection>();
+            foreach(var row in snapshot.Rows)if(KnownNetwork(snapshot.Path,row))knownNetwork.Add(row);
+            if(knownNetwork.Count>0) {
+                reason="MEMORY_NETWORK_AND_PORT";
+                return knownNetwork.Count==1?knownNetwork[0]:null;
+            }
+            // Across matches the server address can change while the confirmed match port remains
+            // the same. Only automate when exactly one socket on a learned port appeared after
+            // observation began; ambiguity still requires an explicit user choice.
+            var newOnKnownPort=new List<GameConnection>();
+            foreach(var row in snapshot.Rows)
+                if(observation.IsNew(row,DateTime.UtcNow)&&KnownPort(snapshot.Path,row.RemotePort))newOnKnownPort.Add(row);
+            if(newOnKnownPort.Count>0) {
+                reason="KNOWN_PORT_AND_UNIQUE_NEW_SOCKET";
+                return newOnKnownPort.Count==1?newOnKnownPort[0]:null;
             }
             found=GameConnections.Select(snapshot.Rows,null);reason=found==null?"MANUAL_REQUIRED":"UNIQUE_3724";return found;
+        }
+        internal static void SelfTest() {
+            string file=System.IO.Path.Combine(System.IO.Path.GetTempPath(),"HSRC-memory-test-"+Guid.NewGuid().ToString("N")+".txt");
+            try {
+                var memory=new ConnectionMemory(file);string gamePath=@"C:\Games\Hearthstone\Hearthstone.exe";
+                memory.Confirm(gamePath,new GameConnection{RemoteAddress="198.51.10.10",RemotePort=1119},"USER_CONFIRMED");
+                var service=new GameConnection{LocalAddress="192.0.2.1",LocalPort=40000,RemoteAddress="203.0.113.20",RemotePort=1119};
+                var networkMatch=new GameConnection{LocalAddress="192.0.2.1",LocalPort=40001,RemoteAddress="198.51.20.30",RemotePort=1119};
+                var observation=new ConnectionObservation();DateTime now=DateTime.UtcNow;
+                observation.Update(7,9,new List<GameConnection>{service,networkMatch},now);
+                var snapshot=new ConnectionSnapshot{Path=gamePath,Rows=new List<GameConnection>{service,networkMatch}};string reason;
+                if(memory.Select(snapshot,observation,out reason)!=networkMatch||reason!="MEMORY_NETWORK_AND_PORT")throw new Exception("Unique socket on a learned network was not selected.");
+                var match=new GameConnection{LocalAddress="192.0.2.1",LocalPort=40002,RemoteAddress="192.0.2.30",RemotePort=1119};
+                observation.Update(8,10,new List<GameConnection>{service},now.AddSeconds(-1));
+                observation.Update(8,10,new List<GameConnection>{service,match},now);
+                snapshot=new ConnectionSnapshot{Path=gamePath,Rows=new List<GameConnection>{service,match}};
+                if(memory.Select(snapshot,observation,out reason)!=match||reason!="KNOWN_PORT_AND_UNIQUE_NEW_SOCKET")throw new Exception("Unique new socket on a learned port was not selected.");
+                var other=new GameConnection{LocalAddress="192.0.2.1",LocalPort=40003,RemoteAddress="192.0.3.40",RemotePort=1119};
+                observation.Update(8,10,new List<GameConnection>{service,match,other},now);
+                snapshot.Rows.Add(other);
+                if(memory.Select(snapshot,observation,out reason)!=null||reason!="KNOWN_PORT_AND_UNIQUE_NEW_SOCKET")throw new Exception("Ambiguous new sockets must require manual selection.");
+            } finally { try { if(File.Exists(file))File.Delete(file); } catch {} }
         }
     }
     internal sealed class ConnectionPicker : Form {
