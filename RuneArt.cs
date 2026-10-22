@@ -91,6 +91,8 @@ namespace HearthstoneReconnector
     {
         internal event EventHandler FrameChanged;
         internal bool ExternalInput;
+        internal int CaptionSpace;
+        bool InButton(Point point){return new Rectangle(0,CaptionSpace,Width,Height-CaptionSpace).Contains(point);}
         void Changed() { Invalidate(); if(FrameChanged!=null)FrameChanged(this,EventArgs.Empty); }
         internal void InputEnter(){OnMouseEnter(EventArgs.Empty);}
         internal void InputLeave(){OnMouseLeave(EventArgs.Empty);}
@@ -127,20 +129,24 @@ namespace HearthstoneReconnector
         }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Changed(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; pressed = false; Changed(); base.OnMouseLeave(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { if(e.Button == MouseButtons.Left && Enabled && actionEnabled && !moveMode) { pressed = true; if(!ExternalInput) Capture = true; Changed(); } base.OnMouseDown(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { if(e.Button == MouseButtons.Left && Enabled && actionEnabled && !moveMode && InButton(e.Location)) { pressed = true; if(!ExternalInput) Capture = true; Changed(); } base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e) {
-            bool activate = pressed && e.Button == MouseButtons.Left && Enabled && actionEnabled && !moveMode && ClientRectangle.Contains(e.Location);
+            bool activate = pressed && e.Button == MouseButtons.Left && Enabled && actionEnabled && !moveMode && InButton(e.Location);
             pressed = false; if(!ExternalInput) Capture = false; Changed(); base.OnMouseUp(e); if(activate) OnClick(EventArgs.Empty);
         }
         protected override void OnEnabledChanged(EventArgs e) { pressed = false; Changed(); base.OnEnabledChanged(e); }
         internal Bitmap RenderFrame() {
             Color color=busy?Color.FromArgb(111,225,255):error?Color.FromArgb(242,79,64):warning?Color.FromArgb(244,188,71):Color.FromArgb(123,230,161);
             bool flashing=DateTime.UtcNow<flashUntil;
-            var frame=RuneArt.Render(Width,Height,blend,pressed,(!Enabled||!actionEnabled)&&!busy&&!moveMode,busy,phase,(busy||flashing)?color:Color.FromArgb(235,77,45),flashing);
+            int bodyHeight=Height-CaptionSpace;
+            var frame=new Bitmap(Width,Height,PixelFormat.Format32bppArgb);
             using(var g=Graphics.FromImage(frame)) {
-            g.SmoothingMode=SmoothingMode.AntiAlias;
+                g.SmoothingMode=SmoothingMode.AntiAlias;
+                using(var art=RuneArt.Render(Width,bodyHeight,blend,pressed,(!Enabled||!actionEnabled)&&!busy&&!moveMode,busy,phase,(busy||flashing)?color:Color.FromArgb(235,77,45),flashing))g.DrawImageUnscaled(art,0,CaptionSpace);
+                if(busy && CaptionSpace>0)DrawLoadingCaption(g);
+                g.TranslateTransform(0,CaptionSpace);
             if(moveMode) {
-                using(var path = RuneArt.Rounded(new RectangleF(4, 4, Width - 8, Height - 8), 9))
+                using(var path = RuneArt.Rounded(new RectangleF(4, 4, Width - 8, bodyHeight - 8), 9))
                 using(var pen = new Pen(Color.FromArgb(255, 212, 100), 2.5f)) { pen.DashStyle = DashStyle.Dash; g.DrawPath(pen, path); }
                 float x = Width - 18, y = 17;
                 using(var pen = new Pen(Color.FromArgb(255, 224, 146), 1.8f)) {
@@ -153,6 +159,19 @@ namespace HearthstoneReconnector
             }
             }
             return frame;
+        }
+        void DrawLoadingCaption(Graphics g) {
+            using(var path=new GraphicsPath())using(var format=new StringFormat()) {
+                format.Alignment=StringAlignment.Center;format.LineAlignment=StringAlignment.Center;
+                using(var font=new Font("Georgia",15,FontStyle.Bold,GraphicsUnit.Pixel))
+                    path.AddString("Спасибо Боб",font.FontFamily,(int)FontStyle.Bold,15,new RectangleF(2,0,Width-4,CaptionSpace-2),format);
+                using(var outline=new Pen(Color.FromArgb(230,25,13,5),3)){outline.LineJoin=LineJoin.Round;g.DrawPath(outline,path);}
+                using(var gradient=new LinearGradientBrush(new RectangleF(0,0,Width,CaptionSpace),Color.Gold,Color.Gold,0f)) {
+                    gradient.InterpolationColors=new ColorBlend{Colors=new Color[]{Color.FromArgb(255,169,48),Color.FromArgb(255,242,168),Color.FromArgb(115,227,255),Color.FromArgb(255,242,168),Color.FromArgb(255,169,48)},Positions=new float[]{0,.25f,.5f,.75f,1}};
+                    gradient.WrapMode=WrapMode.Tile;gradient.TranslateTransform(phase/360f*Width*2,0);
+                    g.FillPath(gradient,path);
+                }
+            }
         }
         protected override void OnPaint(PaintEventArgs e) { using(var frame=RenderFrame())e.Graphics.DrawImageUnscaled(frame,0,0); }
         protected override void Dispose(bool disposing) { if(disposing) animation.Dispose(); base.Dispose(disposing); }

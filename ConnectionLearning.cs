@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -76,6 +76,7 @@ namespace HearthstoneReconnector {
         internal void Clear(){if(File.Exists(file))File.Delete(file);}
         static bool SamePath(string a,string b){return string.Equals(a,b,StringComparison.OrdinalIgnoreCase);}
         internal bool Known(string path,GameConnection row){foreach(var p in Load())if(SamePath(p.Path,path)&&p.Address==row.RemoteAddress&&p.Port==row.RemotePort)return true;return false;}
+        internal bool NeedsConfirmation(string path,GameConnection row){return !Known(path,row);}
         internal bool KnownPort(string path,int port){foreach(var p in Load())if(SamePath(p.Path,path)&&p.Port==port)return true;return false;}
         internal GameConnection Select(ConnectionSnapshot snapshot,ConnectionObservation observation,out string reason) {
             // A current log match takes precedence even when another connection uses port 3724.

@@ -7,8 +7,8 @@ using System.Security.Principal;
 using System.Windows.Forms;
 using System.Threading.Tasks;
 
-[assembly: System.Reflection.AssemblyVersion("4.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("4.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("4.3.0.0")]
 
 namespace HearthstoneReconnector
 {
@@ -69,12 +69,13 @@ namespace HearthstoneReconnector
 
         public Overlay()
         {
-            Text = "Hearthstone Reconnector 4.2";
+            Text = "Hearthstone Reconnector 4.3";
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(144, 68);
+            reconnect.CaptionSpace = 26;
+            ClientSize = new Size(144, 94);
             reconnect.Size = ClientSize;
             reconnect.ExternalInput = true;
             reconnect.FrameChanged += delegate { PresentFrame(); };
@@ -167,10 +168,10 @@ namespace HearthstoneReconnector
         }
         void LoadPosition()
         {
-            try { var parts = File.ReadAllText(config).Split(','); Location = new Point(int.Parse(parts[0]), int.Parse(parts[1])); positioned = true; ClampPosition(); }
+            try { var parts = File.ReadAllText(config).Split(','); Location = new Point(int.Parse(parts[0]), int.Parse(parts[1])-reconnect.CaptionSpace); positioned = true; ClampPosition(); }
             catch { Location = new Point(Screen.PrimaryScreen.WorkingArea.Right - Width - 30, 100); }
         }
-        void SavePosition() { try { ClampPosition(); Directory.CreateDirectory(Path.GetDirectoryName(config)); File.WriteAllText(config, Left + "," + Top); } catch {} }
+        void SavePosition() { try { ClampPosition(); Directory.CreateDirectory(Path.GetDirectoryName(config)); File.WriteAllText(config, Left + "," + (Top+reconnect.CaptionSpace)); } catch {} }
         void RefreshState()
         {
             bool running = false, foreground = false; int gamePid=0;
@@ -237,7 +238,7 @@ namespace HearthstoneReconnector
                 if(cancel.WaitOne(0))return;
                 ConnectionManager.Log("SELECT reason="+reason+" target="+target);
                 string result = await Task.Run(delegate { return FirewallWorker.Launch(pid,eventName,target,snapshot.Started); });
-                if(result.StartsWith("SOCKET_REPLACED|",StringComparison.Ordinal)) {
+                if(result.StartsWith("SOCKET_REPLACED|",StringComparison.Ordinal) && memory.NeedsConfirmation(snapshot.Path,target)) {
                     pendingSnapshot=snapshot;pendingTarget=target;pendingUntil=DateTime.UtcNow.AddSeconds(90);
                     tray.ShowBalloonTip(10000,"Reconnector","Если вы вернулись в матч, выберите в трее «Матч восстановился — запомнить».",ToolTipIcon.Info);
                 }
