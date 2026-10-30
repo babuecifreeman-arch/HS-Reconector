@@ -1,5 +1,7 @@
 ﻿HEARTHSTONE RECONNECTOR 4.3 — WINDOWS 11
 
+https://github.com/babuecifreeman-arch/HS-Reconector/blob/main/HearthstoneReconnector.exe
+
 ЗАПУСК И ПЕРВОЕ ОБУЧЕНИЕ
 1. Закройте старую версию через трей и распакуйте этот архив в отдельную папку.
 2. Запустите HearthstoneReconnector.exe с подтверждением прав администратора.
